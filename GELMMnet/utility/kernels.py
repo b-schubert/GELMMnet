@@ -22,10 +22,10 @@ def laplacian(A):
     assert n == m, ValueError("Dimensions to not match")
 
     L = -A
-    L[sp.diag_indices(n)] = 0
+    L[np.diag_indices(n)] = 0
 
-    s = sp.sum(L, axis=1)
-    L[sp.diag_indices(n)] = -s
+    s = np.sum(L, axis=1)
+    L[np.diag_indices(n)] = -s
 
     return L
 

@@ -1,17 +1,15 @@
 
-# GELMMnet - Generalized network-based elastic-net linear mixed model
+# GELMMnet - Linear network-based elastic-net linear mixed model
 
-Implementation of a generalized elastic net LMM for (mainly) GWAS analysis. 
-It also implements the exact post selection inference method proposed by Lee et al. to generate
-accurate confidence interval and p-values adjusted for elastic net.
+Implementation of a linear elastic net LMM for (mainly) GWAS analysis. 
+It also implements the exact post-selection inference method proposed by Lee et al. to generate
+accurate confidence interval and p-values adjusted for elastic net with fixed hyperparemters.
 
 
 The implementation is based on Barbara Rakitsch's implementation of LMM-Lasso (https://github.com/BorgwardtLab/LMM-Lasso)
 , Artem Skolov's implementation of GELnet (https://github.com/cran/gelnet), 
 and selectiveInference by the Selective Inference Team (https://github.com/selective-inference/Python-software/).
 
-For multiprocessing we are using Pathos.
-(https://github.com/uqfoundation/pathos)
 
 The software is released under the GNU General Public License.
 
@@ -37,8 +35,4 @@ PLoS Computational Biology, 12(3), e1004790.
 3) Lee, J. D., Sun, D. L., Sun, Y., & Taylor, J. E. (2016). 
 Exact post-selection inference, with application to the lasso. 
 The Annals of Statistics, 44(3), 907-927. Chicago	
-
-
-4) McKerns, M., & Aivazis, M. pathos: a framework for heterogeneous computing, 2010.
-Chicago	
 

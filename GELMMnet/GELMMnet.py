@@ -29,26 +29,28 @@ import multiprocessing as mp
 from collections import OrderedDict
 from itertools import starmap
 
+import itertools
 import numpy as np
 import pandas as pd
 import scipy as sp
 
+from GELMMnet.utility.estimator import _nonparametric_cov_bootstrap, _sandwich_estimator
+
 np.seterr(all="ignore")
 
-from sklearn.model_selection import KFold
+
 from sklearn.preprocessing import scale
 
 from GELMMnet.utility.inference import max_l1, _eval_neg_log_likelihood, _optimize_gelnet, _predict, _parameter_search, \
-    _rmse, _corr
-from GELMMnet.utility.kernels import kinship
-from GELMMnet.utility.postselection import _calc_interval, _calc_pval, _tg_limits, _tg_pval, _tg_interval
+    _rmse, _corr, _cv_grid_search, alpha_grid
+from GELMMnet.utility.postselection import _tg_limits, _tg_pval, _tg_interval
 
 
 class GELMMnet(object):
     """
     Generalized network-based elastic-net linear mixed model
 
-    \min_\beta~\frac{1}{2}\sum_{i=1}^N (y_i - X_i\beta)^2 + \lambda_1\|\beta\|_1 + \frac{\lambda_2}{2}\beta^TP\beta
+    \min_\beta~\frac{1}{2}\sum_{i=1}^N (y_i - X_i\beta)^2 + \alpha*\lambda\|\beta\|_1 + \frac{(1-\lambda)\alpha}{2}\beta^TP\beta
 
     1) We first infer sigma_g and sigma_e based on a Null-model following Kang et al 2010.
     2) We than rotate y and S based on the eigendecomposition of K following Rakitsch et al 2013
@@ -86,7 +88,7 @@ class GELMMnet(object):
         self.y = y
         self.X = X
         self.K = K
-        self.P = None
+        self.P = np.identity(self.__m)
 
         self.SUX = None
         self.SUy = None
@@ -99,7 +101,10 @@ class GELMMnet(object):
         self.l1 = 1.0
         self.l2 = 1.0
 
-        self.summary = None
+        self.hyperparameter_grid = None
+        self.min_idx = None
+        self.cv_error_curve = None
+        self.nfold = 5
 
     @property
     def Xtilde(self):
@@ -205,36 +210,18 @@ class GELMMnet(object):
         self.b = b
         return b, w
 
-    def kfoldFit(self, P, nfold=5, l1_nof=10, l2_nof=10, eps=1e-8, max_iter=10000, cpu=1, chunksize=None, debug=False):
+    def kfoldFit(self, P, nfold=5, l1_ratio=(.1, .5, .7, .9, .95, .99, 1), alpha_nof=100, eps=1e-8, max_iter=10000, scale=0, debug=False):
         """
         optimizes l1 and l2 based on k-fold cv with grid search minimizing the MSE
 
         """
-
-        def generate_grid():
-            for i, (train_id, test_id) in enumerate(cv.split(Xt)):
-                Xtrain, Xtest, Xpred = Xt[train_id], Xv[test_id], Xv[train_id]
-                ytrain, ytest, ypred = y[train_id], yv[test_id], yv[train_id]
-                n,m = Xtrain.shape
-                for l1 in l1s:
-                    for l2 in l2s:
-                        yield [i, l1, l2, delta, self.__isIntercept,
-                               ytrain, ypred, Xtrain, Xpred, ytest, Xtest, P, eps, max_iter, n, m]
-
         self.P = P
-        if chunksize is None:
-            chunksize = cpu
-
+        self.nfold = nfold
         if debug and self.__islmm:
             print("Correcting for population structure")
 
         if self.SUX is None and self.__islmm:
             self.fit_null_model()
-
-        # TODO: checkout https://mcieslik-mctp.github.io/papy/api.html#numap-numap
-        # lazy pool.map evaluator
-        #pool = mp.Pool(processes=cpu)
-        cv = KFold(n_splits=nfold)
 
         Xt = self.SUX if self.__islmm else self.X
         Xv = self.X
@@ -243,37 +230,16 @@ class GELMMnet(object):
         w = self.w
         b = self.b
         delta = np.exp(self.ldelta)
-        S = sp.dot(Xt, w) + b
-        Pw = sp.dot(P, w)
         n, m = Xt.shape
 
-        alpha_ceil = max_l1(y, Xt)
-        if debug:
-            print("Max l1:", alpha_ceil)
-            w, b = _optimize_gelnet(y, Xt, P, alpha_ceil, 0, S, Pw, n, m, max_iter, eps, w, b, self.__isIntercept)
-            print("w != 0:", np.where(np.fabs(w) > 1e-5 / np.sqrt(np.sum(np.power(Xt, 2), axis=0)))[0])
+        # needed for post-selection
+        Xy = np.dot(Xt.T, y[:, 0])
+        self.hyperparameter_grid = [(r*a, (1.-r)*a) for r in l1_ratio
+                                    for a in alpha_grid(r, Xy, Xt.shape[0], alpha_nof)]
 
-        n = max(1, int(l2_nof / 2))
-        l2s = [10**x for x in range(-n, n)]+[0]
-        l1s = np.linspace(0.0, alpha_ceil, num=l1_nof, endpoint=False)
-
-        if debug:
-            print("L2:", l2s)
-            print("L1:", l1s)
-
-        grid_result = starmap(_parameter_search, generate_grid())
-
-        #pool.close()
-        #pool.join()
-
-        # summarize grid search results
-        sum_res = {}
-
-        for fold, error, l1, l2 in grid_result:
-            sum_res.setdefault((l1, l2), []).append(error)
-
-        # find best l1, l2 pair across the folds
-        (l1, l2), error = max(sum_res.items(), key=lambda x: np.mean(x[1]))
+        min_idx, l1, l2, error, error_curve = _cv_grid_search(Xt, Xv, y, yv, P, delta, self.__isIntercept,
+                                                     scale, self.hyperparameter_grid, nfold, max_iter, eps,
+                                                              self.__islmm)
 
         if debug:
             print("Best Parameters:", l1, l2, "With error:", np.mean(error))
@@ -282,22 +248,29 @@ class GELMMnet(object):
         S = np.dot(Xt, w) + b
         Pw = np.dot(P, w)
         w, b = _optimize_gelnet(y, Xt, P, l1, l2, S, Pw, n, m, max_iter, eps, w, b, self.__isIntercept)
-        yhat = _predict(Xv, yv, Xv, w, b, delta)
+        yhat = _predict(Xv, yv, Xv, w, b, delta, self.__islmm)
 
         self.w = w
         self.b = b
         self.l1 = l1
         self.l2 = l2
+        self.min_idx = min_idx
+        self.cv_error_curve = error_curve
 
         if debug:
+            print(yv[:,0][:10])
+            print(yhat[:10])
             print("Training Correlation:", _corr(yv[:, 0], yhat)," Training Error:", _rmse(yv[:, 0], yhat))
 
         df = np.sum(w != 0) - 1
         sigma = np.sqrt(np.sum(np.power(yv[:, 0] - yhat, 2)))/(len(y) - df)
         self.sigma = sigma
         if debug:
+            print("nominator:", np.sqrt(np.sum(np.power(yv[:, 0] - yhat, 2))))
+            print("denominator:", (len(y) - df))
             print("sigma:", sigma)
-        return l1, l2, sigma
+
+        return l1, l2, sigma, error_curve
 
     def predict(self, X_tilde):
         """
@@ -315,14 +288,11 @@ class GELMMnet(object):
         b = self.b
         y = self.y
         X = self.X
-        #if self.__isStandardized:
-        #    X_tilde = scale(X_tilde, with_std=False)
-
         delta = np.exp(self.ldelta)
 
-        return _predict(X, y, X_tilde, w, b, delta)
+        return _predict(X, y, X_tilde, w, b, delta, self.__islmm)
 
-    def post_selection_analysis(self, alpha=0.1, compute_intervals=False, gridrange=[-100, 100], tol_beta=1e-5,
+    def post_selection_analysis(self, alpha=0.1, compute_intervals=False, gridrange=(-100, 100), tol_beta=1e-5,
                                 tol_kkt=0.1, sigma=None):
         """
         implements the post selection analysis proposed by
@@ -331,22 +301,27 @@ class GELMMnet(object):
         Exact post-selection inference, with application to the lasso.
         The Annals of Statistics, 44(3), 907-927.
 
+        only applicable for fixed hyperparameters! Hyperparameter optimization will effect the correctness of the
+        p-values
 
         See: https://github.com/selective-inference/Python-software
 
-        :param float alpha: The (1-alpha)*100% selective confidence intervals
-        :param bool UMAU: Whethter UMAU intervals should be calculated
+        :param float alpha: The (1-alpha) selective confidence intervals
         :return: DataFrame with one entry per active variable. Columns are
 
         'variable', 'pval', 'lasso', 'beta','Zscore', 'lower_ci', 'upper_ci', 'lower_trunc', 'upper_trunc', 'sd'.
 
         """
+        if self.hyperparameter_grid is not None:
+            Warning("p-values might be strongly effected by hyperparameter estimation. \
+                    Consider using 'kfold_post_selection_analysis' instead.")
+
         if self.SUX is None and self.__islmm:
             RuntimeError("The model has not been trained yet")
 
-        X = self.X
+        X = self.SUX if self.__islmm else self.X
         n,m = X.shape
-        y = self.y[:, 0]
+        y = self.SUy if self.__islmm else self.y[:,0]
         w = self.w
         P = self.P
         l2 = self.l2
@@ -354,7 +329,7 @@ class GELMMnet(object):
         _sigma = np.std(y)
 
         if sigma is not None:
-            _sigma= sigma
+            _sigma = sigma
         if self.sigma is not None:
             _sigma = self.sigma
 
@@ -413,6 +388,7 @@ class GELMMnet(object):
         M = np.dot(H_AAinv, np.transpose(XM))
 
         result = []
+        print("Starting p-value calculation")
         for j in range(k):
 
             vj = M[j]
@@ -421,10 +397,13 @@ class GELMMnet(object):
             sign = np.sign(np.sum(vj*y))
             vj = sign * vj
 
-            #calculate p-value
-            #_pval, vlo, vup = _calc_pval(y, A, b, vj, _sigma)
+            # calculate p-value
             vlo, vup, sd, estimate = _tg_limits(y, A, b, vj, np.diag(np.ones(n)*np.power(_sigma, 2)))
             _pval = _tg_pval(estimate, vlo, vup, sd)
+
+            # two-sided; I think calculated p-value is one-sided
+            #_pval = 2. * min(_pval, 1. - _pval)
+
             vmat = vj * mj * sign
 
             if compute_intervals:
@@ -434,6 +413,7 @@ class GELMMnet(object):
                 ci = [x*mj for x in _interval]
             else:
                 ci = [np.nan, np.nan]
+                tailarea = [np.nan, np.nan]
 
             sd = _sigma * np.sqrt(np.sum(np.power(vmat, 2)))
             coef0 = np.dot(vmat, y)
@@ -462,5 +442,155 @@ class GELMMnet(object):
                                                         np.array(result).T)])).set_index('variable')
         self.summary = df
         return df
+
+    def kfold_post_selection_analysis(self, alpha=0.1, compute_intervals=False, gridrange=(-100, 100),
+                                      tol_beta=1e-5, tol_kkt=0.1, nsamples=500):
+        """
+        Implements the grid search and selection process correction procedure proposed by
+
+
+        Markovic, J., Xia, L., & Taylor, J. (2017).
+        Adaptive p-values after cross-validation.
+        arXiv pre-print arXiv:1703.06559.
+
+        :param alpha:
+        :param compute_intervals:
+        :param gridrange:
+        :param tol_beta:
+        :param tol_kkt:
+        :return:
+        """
+        raise NotImplementedError()
+
+        Xt = self.SUX if self.__islmm else self.X
+        Xv = self.X
+        yt = self.SUy if self.__islmm else self.y
+        yv = self.y
+        w = self.w
+        b = self.b
+        delta = np.exp(self.ldelta)
+        P = self.P
+        l2 = self.l2
+        l1 = self.l1
+        n, m = Xt.shape
+
+        active = np.where(np.fabs(w) > tol_beta / np.sqrt(np.sum(np.power(Xt, 2), axis=0)))[0]
+        inactive = np.where(np.fabs(w) <= tol_beta / np.sqrt(np.sum(np.power(Xt, 2), axis=0)))[0]
+        active_signs = np.sign(w[active])
+
+        nactive = len(active)
+
+        if not nactive:
+            raise ValueError("Solution is the null model. No variables were selected during inference")
+
+        # setup model selection constraints
+        H = (np.dot(np.transpose(Xt), Xt) + l2 * P)
+        H_AA = H[active][:, active]
+        H_AAinv = np.linalg.pinv(H_AA)
+        XM = Xt[:, active]
+        D = np.diag(active_signs)
+
+        # we probably also need the inactive constraints?!
+        model_A = np.dot(D, np.dot(H_AAinv, np.transpose(XM)))
+        model_a = l1 * np.dot(D, np.dot(H_AAinv, active_signs))
+
+        # TODO: Dont exactly know what the one_step estimator is......
+        one_step = None
+
+        # compute covariance of selected parameters with CV error curve
+        cov = _nonparametric_cov_bootstrap(Xt, Xv, yt, yv, l2, P, delta,
+                                           self.hyperparameter_grid, self.__isIntercept, active, nsamples)
+
+        Sigma = _sandwich_estimator(Xt, yt, l2, P, w, active, inactive, 2000)
+        A = np.dot(cov[1].T, np.linalg.pinv(Sigma))
+        residual = np.array(list(self.cv_error_curve.values())) - np.dot(A, one_step)
+
+
+        # setup CV constraints
+        cv_error_len = len(self.cv_error_curve)
+        lam_keep_randomized = np.zeros(cv_error_len, np.bool)
+        lam_keep_randomized[self.min_idx] = 1
+        B = -np.identity(cv_error_len)
+        B += (np.multiply.outer(lam_keep_randomized, np.ones_like(lam_keep_randomized))).T
+
+        keep = np.ones(cv_error_len, np.bool)
+        keep[self.min_idx] = 0
+        B = B[keep]
+        C = B.dot(A)
+
+        # TODO: put all constraints together LHS and RHS
+        cv_a = -np.dot(B, residual)
+
+
+
+        ################################################################################################################
+        # P-value and CI calculations
+
+        k = len(active)
+        M = np.dot(H_AAinv, np.transpose(XM))
+
+        result = []
+        for j in range(k):
+
+            vj = M[j]
+            mj = np.sqrt(np.sum(np.power(vj, 2)))
+            vj = vj / mj
+            sign = np.sign(np.sum(vj*yt))
+            vj = sign * vj
+
+            # calculate p-value
+            vlo, vup, sd, estimate = _tg_limits(yt, A, b, vj, Sigma)
+            _pval = _tg_pval(estimate, vlo, vup, sd)
+
+            # two-sided; I think calculated p-value is one-sided
+            _pval = 2 * min(_pval, 1 - _pval)
+
+            vmat = vj * mj * sign
+
+            if compute_intervals:
+                _interval, tailarea = _tg_interval(estimate, vlo, vup, sd, alpha,
+                                                   gridrange=gridrange, flip=sign == -1)
+
+                ci = [x*mj for x in _interval]
+            else:
+                ci = [np.nan, np.nan]
+
+            # TODO: this has to be vecotrized as Sigma is now a covariance matrix
+            sd = _sigma * np.sqrt(np.sum(np.power(vmat, 2)))
+            coef0 = np.dot(vmat, yt)
+            result.append((active[j],
+                           _pval,
+                           coef0,
+                           w[active[j]],
+                           coef0 / sd,
+                           ci[0],
+                           ci[1],
+                           tailarea[0],
+                           tailarea[1],
+                           sd))
+
+        df = pd.DataFrame(index=active,
+                          data=OrderedDict([(n, d) for n, d in zip(['variable',
+                                                             'pval',
+                                                             'coef',
+                                                             'beta',
+                                                             'Zscore',
+                                                             'lower_confidence',
+                                                             'upper_confidence',
+                                                             'lower_trunc',
+                                                             'upper_trunc',
+                                                             'sd'],
+                                                            np.array(result).T)])).set_index('variable')
+        self.summary = df
+        return df
+
+
+
+
+
+
+
+
+
 
 

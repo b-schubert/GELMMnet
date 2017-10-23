@@ -21,6 +21,16 @@ def _truncatednorm_surv(z, mean, a, b, sd):
     """
     Truncated normal survival function
 
+
+    Notes
+    -----
+
+        All of the tests are based on the exact pivot $F$ given
+        by the truncated Gaussian distribution for the
+        given direction $\eta$. If the alternative is 'greater'
+        then we return $1-F$; if it is 'less' we return $F$
+        and if it is 'twosided' we return $2 \min(F,1-F)$.
+
     :return: returns P(Z > z)
     """
     def ff(z):
@@ -37,6 +47,7 @@ def _truncatednorm_surv(z, mean, a, b, sd):
     aa = (a - mean) / sd
     bb = (b - mean) / sd
     p = (norm.cdf(bb) - norm.cdf(zz)) / (norm.cdf(bb) - norm.cdf(aa))
+
     # test if we generated any NaNs or infs, if so we approximate these values
     if np.isnan(p) or np.isinf(p):
         # Returns Prob(Z>z | Z in [a,b]), where mean can be a vector, based on
@@ -53,6 +64,7 @@ def _truncatednorm_surv(z, mean, a, b, sd):
         p = (ff(zz) - term2) / (term1 - term2)
         if np.isnan(p):
             return np.NaN
+
         p = min(1.0, max(0.0, p))
     return p
 
