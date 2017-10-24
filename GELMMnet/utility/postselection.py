@@ -49,7 +49,7 @@ def _truncatednorm_surv(z, mean, a, b, sd):
     p = (norm.cdf(bb) - norm.cdf(zz)) / (norm.cdf(bb) - norm.cdf(aa))
 
     # test if we generated any NaNs or infs, if so we approximate these values
-    if np.isnan(p) or np.isinf(p):
+    if np.isnan(p) or np.isinf(p) or p is None:
         # Returns Prob(Z>z | Z in [a,b]), where mean can be a vector, based on
         # A UNIFORM APPROXIMATION TO THE RIGHT NORMAL TAIL INTEGRAL, W Bryc
         # Applied Mathematics and Computation

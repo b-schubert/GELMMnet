@@ -56,7 +56,7 @@ setup(
 
 
     install_requires=[
-        'setuptools>=18.2', 'pandas', 'numpy', 'scipy', 'numba', 'sklearn>=0.14.1',
+        'setuptools>=18.2', 'pandas', 'numpy', 'scipy', 'numba', 'sklearn>=0.14.1', 'h5py'
 
     ],
 

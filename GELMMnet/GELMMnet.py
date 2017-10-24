@@ -2,7 +2,7 @@
 GELMMnet.py
 
 Author:		Benjamin Schubert
-Year:		2015
+Year:		2017
 Group:		Debora Marks Group
 Institutes:	Systems Biology, Harvard Medical School, 200 Longwood Avenue, Boston, 02115 MA, USA
 
@@ -25,25 +25,21 @@ The implementation is based on Barbara Rakitsch's implementation of LMM-Lasso (h
 of selectiveInference (https://cran.r-project.org/web/packages/selectiveInference/index.html)
 
 """
-import multiprocessing as mp
-from collections import OrderedDict
-from itertools import starmap
+import h5py
 
-import itertools
+from collections import OrderedDict
+
 import numpy as np
 import pandas as pd
 import scipy as sp
-
-from GELMMnet.utility.estimator import _nonparametric_cov_bootstrap, _sandwich_estimator
-
-np.seterr(all="ignore")
-
-
 from sklearn.preprocessing import scale
 
-from GELMMnet.utility.inference import max_l1, _eval_neg_log_likelihood, _optimize_gelnet, _predict, _parameter_search, \
-    _rmse, _corr, _cv_grid_search, alpha_grid
+from GELMMnet.utility.estimator import _nonparametric_cov_bootstrap, _sandwich_estimator
+from GELMMnet.utility.inference import _eval_neg_log_likelihood, _optimize_gelnet, _predict, \
+                                       _rmse, _corr, _cv_grid_search, alpha_grid
 from GELMMnet.utility.postselection import _tg_limits, _tg_pval, _tg_interval
+
+np.seterr(all="ignore")
 
 
 class GELMMnet(object):
@@ -114,6 +110,74 @@ class GELMMnet(object):
     def ytilde(self):
         return self.SUy
 
+    def save(self, file_name):
+        """
+        saves model to hdf5 file
+
+        :param file_name: path to file
+        """
+        with h5py.File(file_name, "w") as hdf5:
+            # single values
+            hdf5.attrs["isIntercept"] = self.__isIntercept
+            hdf5.attrs["b"] = self.b
+            hdf5.attrs["sigma"] = self.sigma
+            hdf5.attrs["ldelta"] = self.ldelta
+            hdf5.attrs["l1"] = self.l1
+            hdf5.attrs["l2"] = self.l2
+            hdf5.attrs["min_idx"] = self.min_idx
+            hdf5.attrs["nfold"] = self.nfold
+
+            hdf5.create_dataset("y", data=self.y, compression="gzip", compression_opts=9)
+            hdf5.create_dataset("X", data=self.X, compression="gzip", compression_opts=9)
+            hdf5.create_dataset("K", data=self.K, compression="gzip", compression_opts=9)
+            hdf5.create_dataset("P", data=self.P, compression="gzip", compression_opts=9)
+            hdf5.create_dataset("SUX", data=self.SUX, compression="gzip", compression_opts=9)
+            hdf5.create_dataset("SUy", data=self.SUy, compression="gzip", compression_opts=9)
+            hdf5.create_dataset("w", data=self.w, compression="gzip", compression_opts=9)
+
+            hdf5.create_dataset("hyperparameter_grid", data=np.array(self.hyperparameter_grid),
+                                compression="gzip", compression_opts=9)
+            # currently this is stored as dict which cant be easily written to hdf5
+            #hdf5.create_dataset("error_curve",compression="gzip", compression_opts=9)
+
+
+    @classmethod
+    def init_from_hdf5(cls, hdf5_file):
+        """
+        initializes a GELMM from a hdf5 file
+
+        :param hdf5_file: the path to the hdf5 file
+        :return: GELMMnet
+        """
+        with h5py.File(hdf5_file, "r") as hdf:
+            # y, X, K = None, intercept = True
+            y = hdf["y"][:, :]
+            X = hdf["X"][:, :]
+            K = hdf["K"][:, :]
+            intercept = hdf.attrs["isIntercept"]
+
+            gelmm = cls(y, X, K=K, intercept=intercept)
+
+            # set single value attributes
+            gelmm.b = hdf.attrs["b"]
+            gelmm.sigma = hdf.attrs["sigma"]
+            gelmm.ldelta = hdf.attrs["ldelta"]
+            gelmm.l1 = hdf.attrs["l1"]
+            gelmm.l2 = hdf.attrs["l2"]
+            gelmm.min_idx = hdf.attrs["min_idx"]
+            gelmm.nfold = hdf.attrs["nfold"]
+
+            # set remaining matrices
+            gelmm.w = hdf["w"][:]
+            gelmm.P = hdf["P"][:, :]
+            gelmm.SUX = hdf["SUX"][:, :]
+            gelmm.SUy = hdf["SUy"][:, :]
+
+            # additional data structures
+            gelmm.hyperparameter_grid = list(map(tuple, hdf["hyperparameter_grid"]))
+
+        return gelmm
+
     def fit_null_model(self, numintervals=100, ldeltamin=-20, ldeltamax=20, debug=False):
         """
         Optimizes sigma_g and simga_e based on a grid search using the approach
@@ -175,7 +239,7 @@ class GELMMnet(object):
             print("SUX", SUX)
             print("SUy", SUy)
 
-    def fit(self, P, l1=None, l2=None, eps=1e-8, max_iter=1000):
+    def fit(self, P, l1=None, l2=None, eps=1e-8, max_iter=1000, debug=False):
         """
             Train complete model
         """
@@ -188,7 +252,7 @@ class GELMMnet(object):
         self.P = P
 
         if self.SUX is None and self.__islmm:
-            self.fit_null_model()
+            self.fit_null_model(debug=debug)
 
         X = self.SUX if self.__islmm else self.X
         y = self.SUy if self.__islmm else self.y
@@ -210,7 +274,8 @@ class GELMMnet(object):
         self.b = b
         return b, w
 
-    def kfoldFit(self, P, nfold=5, l1_ratio=(.1, .5, .7, .9, .95, .99, 1), alpha_nof=100, eps=1e-8, max_iter=10000, scale=0, debug=False):
+    def kfoldFit(self, P, nfold=5, l1_ratio=(.1, .5, .7, .9, .95, .99, 1), alpha_nof=100, eps=1e-8,
+                 max_iter=10000, scale=0, debug=False):
         """
         optimizes l1 and l2 based on k-fold cv with grid search minimizing the MSE
 

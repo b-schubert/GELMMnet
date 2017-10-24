@@ -96,8 +96,8 @@ def _update_wj(X, y, P, w, l1, l2, S, Pw, n, m, j):
     return numerator / denom
 
 
-#@jit(nopython=True, cache=True)
-@jit(nopython=True, parallel=True)
+@jit(nopython=True, cache=True)
+#@jit(nopython=True, parallel=True)
 def _optimize_gelnet(y, X, P, l1, l2, S, Pw, n, m, max_iter, eps, w, b, with_intercept):
     """
     Coordinate descent of a generalized elastic net
@@ -110,8 +110,8 @@ def _optimize_gelnet(y, X, P, l1, l2, S, Pw, n, m, max_iter, eps, w, b, with_int
     # optimize for max_iter steps
     for i in range(max_iter):
         # update each weight individually
-        #for j in range(m):
-        for j in prange(m):
+        for j in range(m):
+        #for j in prange(m):
             w_old = w[j]
 
             w[j] = _update_wj(X, y, P, w, l1, l2, S, Pw, n, m, j)
@@ -188,7 +188,7 @@ def max_l1(y, X):
     return np.max(np.fabs(xy))
 
 
-@jit(nopython=True)
+#@jit()
 def alpha_grid(l1_ratio, Xy, n_samples,  n_alphas, eps=1e-3):
     """
     Compute the grid of alpha values for elastic net parameter search
@@ -290,9 +290,13 @@ def _cv_grid_search(Xt, Xv, yt, yv, P, delta, isIntercept, scale, param_grid, no
     cv = KFold(nof_cv)
 
     grid_result = []
-
+    total = nof_cv * len(param_grid)
+    c = 0
     for p in generate_grid():
-        grid_result.append(_parameter_search(*p))
+        r = _parameter_search(*p)
+        grid_result.append(r)
+        c += 1
+        print(c, " of ", total, r)
 
     # summarize grid search results
     sum_res = {}
